@@ -1,0 +1,30 @@
+{
+  "name": "esf-emails-verify",
+  "version": "1.0.0",
+  "description": "Verify bunch of emails",
+  "main": "index.js",
+  "scripts": {
+    "test": "node test"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tarquas/esf-emails-verify.git"
+  },
+  "keywords": [
+    "email",
+    "verify",
+    "valid",
+    "invalid",
+    "mailtester",
+    "esfunctional",
+    "es6"
+  ],
+  "author": "Taras Mykhailovych",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/tarquas/esf-emails-verify/issues"
+  },
+  "homepage": "https://github.com/tarquas/esf-emails-verify#readme",
+  "dependencies": {
+  }
+}
