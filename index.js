@@ -55,7 +55,7 @@ let http = require('http');
 
 let S = module.exports;
 
-S.resolveMxAction = (domain) => () => dns [promisify]('resolveMx')(domain);
+S.resolveMxAction = (domain) => () => dns [promisify]('resolveMx')(domain) [catcha](() => []);
 
 module.exports.checkEmails = (emails, proxies, opts) => spawn(function*(arg) {
   if (!opts) opts = {};
