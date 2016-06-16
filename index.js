@@ -1,7 +1,50 @@
 'use strict';
 
-if (!global.esfunctional || esfunctional < 1.0500) {
-  console.error('This module requires `esfunctional` framework version >= 1.5');
+// usage:
+//   let verified = yield esfEmailsVerify.checkEmails(
+//     ['email@domain.tld'],
+//     ['http://some:auth@proxyserver.tld'], // list of proxy servers to use* null means direct connection
+//     {dns: {timeout: 20000}} // options**
+//   );
+//
+//   >>> {'email@domain.tld': true | false | null | <Error> }
+//    + false: email is invalid
+//    + true: email is valid
+//    + null: MX server does not support email verification
+//    + instanceof Error: which error occured processing verification
+//
+// *  Only 'http:' protocol and HTTP CONNECT method is currently supported.
+//      make sure proxy servers allow tunneling to port 25 (usually restricted on public proxies).
+//
+// ** Funnel optimization options: { 
+//   dns: { //DNS requests options
+//     maxSimReq: maximum simultaneous requests (5),
+//     chunkDelay: delay between chunks of simultaneous requests [msec] (100 msec),
+//     timeout: timeout for resolving each entry [msec] (10 sec)
+//   },
+//
+//   smtp: { //SMTP requests options
+//     maxEmailsPerReq: maximum allowed number of emails to test using one request (16),
+//     maxSimSameMx: maximum simultaneous connections to same MX (1),
+//     sameMxChunkDelay: delay between chunks of simultaneous requests to same MX [msec] (100 msec),
+//     sameMxTimeout: timeout for each request to same MX [msec] (10 sec),
+//
+//     maxSimMx: maximum simultaneous requests to different MXs (30),
+//     mxChunkDelay: delay between chunks of simultaneous requests to different MX servers [msec] (100 msec),
+//
+//     connectTimeout: timeout of TCP connection establishment [msec] (10 sec),
+//
+//     maxSimProxies: maximum simultaneous proxy servers to ask.
+//       if result is acquired, no more proxy servers are asked (5),
+//
+//     proxyChunkDelay: delay between chunks of simultaneous proxy requests [msec] (100 msec),
+//     proxyTimeout: timeout for socket or each proxy request connection [msec] (10 sec),
+//     proxyEmailTimeout: timeout for single email SMTP check in same connection [msec] (800 msec)
+//   }
+// }
+
+if (!global.esfunctional || esfunctional < 1.0600) {
+  console.error('This module requires `esfunctional` framework version >= 1.6.0');
   return;
 }
 
@@ -14,7 +57,11 @@ let S = module.exports;
 
 S.resolveMxAction = (domain) => () => dns [promisify]('resolveMx')(domain);
 
-module.exports.checkEmails = (emails, proxies) => spawn(function*(arg) {
+module.exports.checkEmails = (emails, proxies, opts) => spawn(function*(arg) {
+  if (!opts) opts = {};
+  if (!opts.dns) opts.dns = {};
+  if (!opts.smtp) opts.smtp = {};
+
   arg[status].processed = 0;
   arg[status].total = emails.length;
   arg[status].onProgress = [];
@@ -29,7 +76,13 @@ module.exports.checkEmails = (emails, proxies) => spawn(function*(arg) {
   let mxsByDomain = yield (
     entsByDomain
     [mapValues]((ents, domain) => S.resolveMxAction(domain))
-    [all]({size: 5, delay: 10, timeout: 10000, timeoutMsg: 'timeout resolving MX records'})
+
+    [all]({
+      size: opts.dns.maxSimReq || 5,
+      delay: opts.dns.chunkDelay || 100,
+      timeout: opts.dns.timeout || 10000,
+      timeoutMsg: 'timeout resolving MX records'
+    })
   );
 
   let mxByDomain = mxsByDomain [mapValues]((mxs) => (
@@ -45,22 +98,25 @@ module.exports.checkEmails = (emails, proxies) => spawn(function*(arg) {
   delete domainsByMx[''];
 
   let emailsByMx = domainsByMx [mapValues]((domains) => (
-    domains [map](domain => entsByDomain[domain] [map]('email')) [flatten]() [chunk](10)
+    domains [map](domain => entsByDomain[domain] [map]('email')) [flatten]() [chunk](opts.smtp.maxEmailsPerReq || 16)
   ));
 
   let resultsByMx = yield emailsByMx [mapValues]((mxEmailsChunks, mx) => () => (
-    mxEmailsChunks [map]((mxEmails) => S.processMxCheckAction(mx, mxEmails, proxies, arg[status])) [all]({
-      size: 20,
-      delay: 100,
-      timeout: 10000,
+    mxEmailsChunks [map]((mxEmails) => S.processMxCheckAction(mx, mxEmails, proxies, opts, arg[status])) [all]({
+      size: opts.smtp.maxSimSameMx || 1,
+      delay: opts.smtp.sameMxChunkDelay || 100,
+      timeout: opts.smtp.sameMxTimeout || 10000,
       timeoutMsg: 'timeout checking emails'
     })
-  )) [all]({size: 10, delay: 100});
+  )) [all]({
+    size: opts.smtp.maxSimMx || 30,
+    delay: opts.smtp.mxChunkDelay || 100
+  });
 
-  let allResults = ({}) [extendArray](
-    resultsByMx [map](obj => ({}) [extendArray](obj))
-    [map]((obj) => (!obj || obj instanceof Error) ? {} : obj)
-  );
+  let allResults = resultsByMx [map]((arr, mx) => arr [map]((obj) => {
+    if (!obj || obj instanceof Error) return emailsByMx[mx][flatten]().map(email => [email, obj]) [fromPairs]();
+    return obj;
+  })) [flatten]() [extendArray]();
 
   return allResults;
 });
@@ -90,22 +146,25 @@ S.readLineUtf8 = (socket, buffer) => spawn(function*() {
   } while (true);
 });
 
-S.processMxCheckAction = (mx, emails, proxies, allStatus) => () => spawn(function*() {
-  let results = yield (proxies || [null]) [map]((proxy) => () => spawn(function*() {
+S.processMxCheckAction = (mx, emails, proxies, opts, allStatus) => () => spawn(function*() {
+  let results = yield index(proxies || ['']) [map]((proxyIndex, proxy) => () => spawn(function*() {
     let socket;
     let result = {};
 
     if (proxy) {
-      let req = http.request({
-        host: proxy.match(/^[^:]*/) [0],
-        port: (proxy.match(/:(.*)$/) || []) [1],
+      let proxyParams = url.parse(proxy);
+      if (proxyParams.protocol !== 'http:') throw new Error(`${mx} protocols of all proxies are not supported`);
+
+      let httpParams = ({
         method: 'CONNECT',
         path: `${mx}:25`
-      });
+      }) [extend](proxyParams [pick]('hostname', 'port', 'auth'));
+
+      let req = http.request(httpParams);
 
       let evtConnect = (
         req [event]('connect', 'error')
-        [timeout](5000, `timeout connecting to mailserver ${mx}`)
+        [timeout](opts.smtp.connectTimeout || 10000, `timeout connecting to mailserver ${mx}`)
       );
 
       req.end();
@@ -130,7 +189,9 @@ S.processMxCheckAction = (mx, emails, proxies, allStatus) => () => spawn(functio
         }
       });
 
-      if ((yield readCode()) !== '220') throw new Error(`${mx} bad invitation code`);
+      let inviteCode = yield readCode();
+      if (!inviteCode) throw new Error(`${mx} tunneling refused from all proxies`);
+      if (inviteCode !== '220') throw new Error(`${mx} bad SMTP invitation code`);
 
       yield write(`HELO mail.example.org\n`);
       if ((yield readCode()) !== '250') throw new Error(`${mx} bad reply after HELO`);
@@ -159,7 +220,13 @@ S.processMxCheckAction = (mx, emails, proxies, allStatus) => () => spawn(functio
     }
 
     return result;
-  })) [all]({race: true, chunk: 5, timeout: 1000 * emails.length, timeoutMsg: `${mx} timeout`}) [catcha]();
+  })) [all]({
+    race: true,
+    chunk: opts.smtp.maxSimProxies || 5,
+    delay: opts.smtp.proxyChunkDelay || 100,
+    timeout: (opts.smtp.proxyTimeout | 10000) + (opts.smtp.proxyEmailTimeout | 800) * emails.length,
+    timeoutMsg: `${mx} timeout`
+  }) [catcha]();
 
   allStatus.processed += emails.length;
   allStatus.onProgress.forEach(spawnAction);

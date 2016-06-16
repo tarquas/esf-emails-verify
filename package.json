@@ -1,6 +1,6 @@
 {
   "name": "esf-emails-verify",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Verify bunch of emails",
   "main": "index.js",
   "scripts": {
