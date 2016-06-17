@@ -185,7 +185,7 @@ S.processMxCheckAction = (mx, emails, proxies, opts, allStatus) => () => spawn(f
     let readCode = () => spawn(function*() {
       while (true) {
         let line = yield read();
-        //console.log(`${mx}: ${line}`);
+//console.log(`>>> ${mx}: ${line}`);
         if (!line) return null;
         let match = line.match(/(\d{3})\s/);
         if (match) return match[1];
@@ -229,14 +229,12 @@ S.processMxCheckAction = (mx, emails, proxies, opts, allStatus) => () => spawn(f
     socket.end();
 
     return result;
-  })) [all]({
+  }) [timeout]((opts.smtp.proxyTimeout | 10000) + (opts.smtp.proxyEmailTimeout | 800) * emails.length, `${mx} timeout`)) [all]({
     race: true,
     chunk: opts.smtp.maxSimProxies || 5,
-    delay: opts.smtp.proxyChunkDelay || 100,
-    timeout: (opts.smtp.proxyTimeout | 10000) + (opts.smtp.proxyEmailTimeout | 800) * emails.length,
-    timeoutMsg: `${mx} timeout`
+    delay: opts.smtp.proxyChunkDelay || 100
   }) [catcha]();
-
+//console.log(results);
   allStatus.processed += emails.length;
   allStatus.onProgress.forEach(spawnAction);
 
