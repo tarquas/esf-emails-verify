@@ -27,7 +27,7 @@
 //     maxEmailsPerReq: maximum allowed number of emails to test using one request (16),
 //     maxSimSameMx: maximum simultaneous connections to same MX (1),
 //     sameMxChunkDelay: delay between chunks of simultaneous requests to same MX [msec] (100 msec),
-//     sameMxTimeout: timeout for each request to same MX [msec] (10 sec),
+//     //sameMxTimeout: timeout for each request to same MX [msec] (10 sec),
 //
 //     maxSimMx: maximum simultaneous requests to different MXs (30),
 //     mxChunkDelay: delay between chunks of simultaneous requests to different MX servers [msec] (100 msec),
@@ -55,7 +55,11 @@ let http = require('http');
 
 let S = module.exports;
 
-S.resolveMxAction = (domain) => () => dns [promisify]('resolveMx')(domain) [catcha](() => []);
+S.resolveMxAction = (domain, opts) => () => (
+  dns [promisify]('resolveMx')(domain)
+  [timeout](opts.dns.timeout || 10000, 'timeout resolving MX records')
+  [catcha](() => [])
+);
 
 module.exports.checkEmails = (emails, proxies, opts) => spawn(function*(arg) {
   if (!opts) opts = {};
@@ -75,13 +79,11 @@ module.exports.checkEmails = (emails, proxies, opts) => spawn(function*(arg) {
 
   let mxsByDomain = yield (
     entsByDomain
-    [mapValues]((ents, domain) => S.resolveMxAction(domain))
+    [mapValues]((ents, domain) => S.resolveMxAction(domain, opts))
 
     [all]({
       size: opts.dns.maxSimReq || 5,
-      delay: opts.dns.chunkDelay || 100,
-      timeout: opts.dns.timeout || 10000,
-      timeoutMsg: 'timeout resolving MX records'
+      delay: opts.dns.chunkDelay || 100
     })
   );
 
@@ -105,8 +107,8 @@ module.exports.checkEmails = (emails, proxies, opts) => spawn(function*(arg) {
     mxEmailsChunks [map]((mxEmails) => S.processMxCheckAction(mx, mxEmails, proxies, opts, arg[status])) [all]({
       size: opts.smtp.maxSimSameMx || 1,
       delay: opts.smtp.sameMxChunkDelay || 100,
-      timeout: opts.smtp.sameMxTimeout || 10000,
-      timeoutMsg: 'timeout checking emails'
+      //timeout: opts.smtp.sameMxTimeout || 10000,
+      //timeoutMsg: 'timeout checking emails'
     })
   )) [all]({
     size: opts.smtp.maxSimMx || 30,
@@ -174,24 +176,28 @@ S.processMxCheckAction = (mx, emails, proxies, opts, allStatus) => () => spawn(f
       socket = net.createConnection(25, mx);
     };
 
+    let established = false;
+
+    let buffer = {};
+    let write = socket [promisify]('write');
+    let read = () => S.readLineUtf8(socket, buffer);
+
+    let readCode = () => spawn(function*() {
+      while (true) {
+        let line = yield read();
+        //console.log(`${mx}: ${line}`);
+        if (!line) return null;
+        let match = line.match(/(\d{3})\s/);
+        if (match) return match[1];
+      }
+    });
+
     try {
-      let buffer = {};
-      let write = socket [promisify]('write');
-      let read = () => S.readLineUtf8(socket, buffer);
-
-      let readCode = () => spawn(function*() {
-        while (true) {
-          let line = yield read();
-          //console.log(`${mx}: ${line}`);
-          if (!line) return null;
-          let match = line.match(/(\d{3})\s/);
-          if (match) return match[1];
-        }
-      });
-
       let inviteCode = yield readCode();
       if (!inviteCode) throw new Error(`${mx} tunneling refused from all proxies`);
       if (inviteCode !== '220') throw new Error(`${mx} bad SMTP invitation code`);
+
+      established = true;
 
       yield write(`HELO mail.example.org\n`);
       if ((yield readCode()) !== '250') throw new Error(`${mx} bad reply after HELO`);
@@ -201,8 +207,8 @@ S.processMxCheckAction = (mx, emails, proxies, opts, allStatus) => () => spawn(f
 
       yield write(`RCPT TO:<somehuhknowninvalidemail${emails[0]}>\n`);
       let badCode = yield readCode();
-      if (badCode === '250') return null;
-      if (badCode !== '550') throw new Error(`${mx} bad reply after invalid email check: ${badCode}`);
+      if (badCode === '250') throw 'unknown';
+      if (badCode !== '550') throw 'unknown'; //throw new Error(`${mx} bad reply after invalid email check: ${badCode}`);
 
       for (let email of emails) {
         yield write(`RCPT TO:<${email}>\n`);
@@ -211,13 +217,16 @@ S.processMxCheckAction = (mx, emails, proxies, opts, allStatus) => () => spawn(f
         else if (code === '550') result[email] = false;
         else throw new Error(`${mx} bad reply after check request: ${code}`);
       }
-
-      yield write(`QUIT\n`);
-      if ((yield readCode()) !== '221') throw new Error(`${mx} not clean exit`);
     } catch (err) {
-      socket.end();
-      throw err;
+      result = err === 'unknown' ? null : err;
     }
+
+    if (established) {
+      yield write(`QUIT\n`);
+      yield readCode();
+    }
+
+    socket.end();
 
     return result;
   })) [all]({
